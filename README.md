@@ -10,8 +10,8 @@ Edit `.env` beside `main.py`:
 YAHOO_EMAIL=you@yahoo.com
 YAHOO_APP_PASSWORD=your-new-yahoo-app-password
 BACKUP_OUTPUT=D:\MailBackup
-BACKUP_LIMIT=10
-BACKUP_FOLDERS=inbox
+BACKUP_LIMIT=
+BACKUP_FOLDERS=all
 ```
 
 A local `.env` has been prepared for this test with the email and destination filled in and the password blank. Enter a newly generated app password yourself. For a fresh checkout, copy `.env.example` to `.env`. `.env` and its variants are ignored by Git; `.env.example` contains placeholders and can be committed. The local password is stored as plain text, so keep this file private. Use a Yahoo app password, not your usual account password.
@@ -68,8 +68,14 @@ For a one-run override: `py main.py --start-date 2025-09-01 --end-date 2025-09-3
 
 ## Folder selection and Yahoo counts
 
-Set `BACKUP_FOLDERS=inbox` in `.env` for Inbox only, or `BACKUP_FOLDERS=all` for every selectable folder. New local/example settings default to Inbox for testing. Without this setting the program preserves the earlier all-folders behavior. `--folders inbox` or `--folders all` overrides the setting for a single run; `--inbox-only` remains available.
+Set `BACKUP_FOLDERS=inbox` in `.env` for Inbox only, or `BACKUP_FOLDERS=all` for every selectable folder. Local/example settings default to all folders without date or message limits. Without this setting the program preserves the earlier all-folders behavior. `--folders inbox` or `--folders all` overrides the setting for a single run; `--inbox-only` remains available.
 
 The app uses `export.imap.mail.yahoo.com`, Yahoo's [documented download server](https://help.yahoo.com/kb/SLN28681.html). The earlier regular IMAP endpoint could expose a limited mailbox view. Counts show messages visible through the server before date or download limits; an exact 10,000 count now displays a possible-incompleteness notice. Compare with Yahoo webmail after rerunning. Do not treat a completed run as proof that Yahoo exposed every message. Yahoo also documents possible download issues for folders with 100,000 or more messages. Existing backups are retained and reused where folder UIDs and UIDVALIDITY match.
 
 Existing hash-based backups are reused on the next run: selected, verified messages are copied into the readable folder without downloading again. Old files remain in place, so this can temporarily use additional disk space. Only messages selected by the current folder/date/limit settings are copied.
+
+## Network interruptions
+
+`IMAP_TIMEOUT=300` in `.env` controls the wait for each network operation in seconds. `BACKUP_RETRIES=5` allows five reconnect attempts after a timeout, connection reset, or aborted IMAP session, waiting 5, 10, 20, 30, then 30 seconds. Each attempt logs in again and resumes through the manifest; verified messages are skipped. Authentication and local disk errors stop immediately. If retries are exhausted, rerun `py main.py`. Increase the timeout for a slow connection or large attachments. Interrupted messages may need to download again, but completed and verified files are retained.
+
+The default run backs up all folders and all dates without a message limit, with a 300-second network timeout and up to five reconnect attempts.

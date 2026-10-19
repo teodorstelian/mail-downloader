@@ -13,6 +13,7 @@ import base64
 import shutil
 import ssl
 import sys
+import time
 from pathlib import Path
 
 
@@ -172,7 +173,7 @@ def load_settings(path):
                     raise ValueError(f'Unclosed quote in .env on line {number}')
                 value = value[1:-1]
             settings[key] = value
-    for key in ('YAHOO_EMAIL', 'YAHOO_APP_PASSWORD', 'BACKUP_OUTPUT', 'BACKUP_LIMIT', 'BACKUP_START_DATE', 'BACKUP_END_DATE', 'BACKUP_FOLDERS'):
+    for key in ('YAHOO_EMAIL', 'YAHOO_APP_PASSWORD', 'BACKUP_OUTPUT', 'BACKUP_LIMIT', 'BACKUP_START_DATE', 'BACKUP_END_DATE', 'BACKUP_FOLDERS', 'IMAP_TIMEOUT', 'BACKUP_RETRIES'):
         if key in os.environ:
             settings[key] = os.environ[key]
     return settings
@@ -209,7 +210,11 @@ def main():
     folder_options.add_argument('--inbox-only', action='store_true', help='Back up only the Inbox')
     parser.add_argument('--start-date', type=parse_date, default=settings.get('BACKUP_START_DATE') or None, help='Include mail received on/after YYYY-MM-DD')
     parser.add_argument('--end-date', type=parse_date, default=settings.get('BACKUP_END_DATE') or None, help='Include mail received on/before YYYY-MM-DD')
+    parser.add_argument('--timeout', type=int, default=settings.get('IMAP_TIMEOUT') or 300, help='Seconds to wait for a network operation (default: 300)')
+    parser.add_argument('--retries', type=int, default=settings.get('BACKUP_RETRIES') or 5, help='Reconnect attempts after network failures (default: 5)')
     args = parser.parse_args()
+    if args.timeout < 1 or args.retries < 0:
+        parser.error('Timeout must be positive and retries must be zero or greater')
     if args.folders not in ('inbox', 'all'):
         parser.error('BACKUP_FOLDERS must be inbox or all')
     inbox_only = args.inbox_only or args.folders == 'inbox'
@@ -225,9 +230,24 @@ def main():
         password = (settings.get('YAHOO_APP_PASSWORD') or getpass.getpass('Yahoo app password (hidden): ')).replace(' ', '')
         if not password:
             raise RuntimeError('A Yahoo app password is required')
-        connection = imaplib.IMAP4_SSL('export.imap.mail.yahoo.com', 993, ssl_context=ssl.create_default_context(), timeout=60)
-        connection.login(address, password)
-        backup(connection, args.output.resolve(), address, args.limit, inbox_only, start_date=args.start_date, end_date=args.end_date)
+        for attempt in range(args.retries + 1):
+            try:
+                connection = imaplib.IMAP4_SSL('export.imap.mail.yahoo.com', 993, ssl_context=ssl.create_default_context(), timeout=args.timeout)
+                connection.login(address, password)
+                backup(connection, args.output.resolve(), address, args.limit, inbox_only, start_date=args.start_date, end_date=args.end_date)
+                break
+            except (TimeoutError, ConnectionError, imaplib.IMAP4.abort):
+                if connection is not None:
+                    try:
+                        connection.shutdown()
+                    except (OSError, imaplib.IMAP4.error):
+                        pass
+                    connection = None
+                if attempt == args.retries:
+                    raise
+                delay = min(5 * (2 ** attempt), 30)
+                print(f'Connection interrupted. Reconnecting in {delay}s (retry {attempt + 1}/{args.retries}); verified files will be skipped.', flush=True)
+                time.sleep(delay)
         return 0
     except (OSError, imaplib.IMAP4.error, RuntimeError, sqlite3.Error, ValueError) as error:
         print(f'Backup stopped: {error}. Fix the problem and run the same command to resume.', file=sys.stderr)

@@ -74,3 +74,22 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 main.main()
             client.assert_not_called()
+
+    def test_timeout_reconnects_and_resumes(self):
+        first, second = Mock(), Mock()
+        with patch.object(main, 'load_settings', return_value={'YAHOO_EMAIL': 'you@yahoo.com', 'YAHOO_APP_PASSWORD': 'fake', 'IMAP_TIMEOUT': '240', 'BACKUP_RETRIES': '1'}), patch.object(main.imaplib, 'IMAP4_SSL', side_effect=[first, second]) as client, patch.object(main, 'backup', side_effect=[TimeoutError('read timed out'), None]) as backup, patch.object(main.time, 'sleep') as sleep, patch('sys.argv', ['main.py']):
+            self.assertEqual(main.main(), 0)
+            self.assertEqual(backup.call_count, 2)
+            self.assertEqual(client.call_args.kwargs['timeout'], 240)
+            first.shutdown.assert_called_once()
+            first.logout.assert_not_called()
+            second.login.assert_called_once_with('you@yahoo.com', 'fake')
+            second.logout.assert_called_once()
+            sleep.assert_called_once_with(5)
+
+    def test_retries_are_bounded_and_auth_errors_are_not_retried(self):
+        for failure, expected in [(TimeoutError('timeout'), 2), (main.imaplib.IMAP4.error('Authentication failed'), 1)]:
+            with self.subTest(failure=type(failure)), patch.object(main, 'load_settings', return_value={'YAHOO_EMAIL': 'you@yahoo.com', 'YAHOO_APP_PASSWORD': 'fake', 'BACKUP_RETRIES': '1'}), patch.object(main.imaplib, 'IMAP4_SSL') as client, patch.object(main, 'backup'), patch.object(main.time, 'sleep'), patch('sys.argv', ['main.py']), patch('sys.stderr'):
+                client.return_value.login.side_effect = failure
+                self.assertEqual(main.main(), 1)
+                self.assertEqual(client.call_count, expected)
