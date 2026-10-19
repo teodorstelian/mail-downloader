@@ -1,49 +1,75 @@
 # Yahoo Mail backup
 
-Requires Python 3.10 or newer. No packages to install.
+Python 3.10+; no packages to install. Yahoo app passwords are the only sign-in method.
 
-1. Sign into your dad's Yahoo account with his permission. In Yahoo Account Security, generate an **app password** for this backup. Use that instead of his usual password. See [Yahoo's IMAP instructions](https://help.yahoo.com/kb/imap-server-settings-yahoo-mail-sln4075.html).
-2. Choose a local drive with enough free space for the entire mailbox and attachments.
-3. Open PowerShell in this project and run:
+## Setup and run
 
-   ```powershell
-   py main.py --email "dad@yahoo.com" --output "D:\MailBackup"
-   ```
+Edit `.env` beside `main.py`:
 
-   Replace the address and destination. Paste the app password when prompted; it is hidden and never saved by this script. If `py` is unavailable, try `python`.
+```dotenv
+YAHOO_EMAIL=you@yahoo.com
+YAHOO_APP_PASSWORD=your-new-yahoo-app-password
+BACKUP_OUTPUT=D:\MailBackup
+BACKUP_LIMIT=10
+BACKUP_FOLDERS=inbox
+```
 
-The script downloads every selectable folder, including Sent, custom folders, Spam and Trash when Yahoo exposes them. Each `.eml` file contains one original message with its headers and embedded attachments. Open these files with an email client that supports EML. Folder directories use safe hashes; `folder.json` records each original IMAP folder name (encoded as supplied by Yahoo). `manifest.sqlite3` tracks downloads and SHA-256 checksums.
+A local `.env` has been prepared for this test with the email and destination filled in and the password blank. Enter a newly generated app password yourself. For a fresh checkout, copy `.env.example` to `.env`. `.env` and its variants are ignored by Git; `.env.example` contains placeholders and can be committed. The local password is stored as plain text, so keep this file private. Use a Yahoo app password, not your usual account password.
 
-Keep the entire backup directory together. Run the same command to resume or capture new mail. Previously saved files are checked against their recorded checksums; missing or changed files are downloaded again. If Yahoo resets folder UIDs, a separate generation is saved, which can duplicate messages but preserves old backups. Run only one backup process per destination. Large mailboxes can take hours or days; rerun after network failures or throttling. The backup reflects messages present as each folder is scanned, not a simultaneous snapshot.
+Set `BACKUP_LIMIT=10` to select up to 10 messages per folder, or `BACKUP_LIMIT=` for no limit. `--limit` overrides this setting for one run.
 
-## Check before clearing storage
+Run from the project folder:
 
-Wait for “Backup complete”, inspect messages and attachments from several folders, and copy the backup to a second drive. The script opens folders read-only and uses BODY.PEEK: it does not delete, move, or mark mail as read. It does not back up contacts, calendars, or account settings. Local email is not encrypted by this script; store it on a protected drive.
+```powershell
+py main.py
+```
 
-Downloading alone **does not free Yahoo storage**. After verifying the backup, you can separately decide which originals to delete in Yahoo. Mail that never reached the account while storage was full cannot be recovered by this downloader.
+Test only 10 Inbox messages first:
 
-If login fails, check the full email address and Yahoo-generated app password. If Yahoo will not generate one, this script cannot bypass that restriction; an email client supporting Yahoo's browser sign-in is an alternative.
+```powershell
+py main.py --inbox-only --limit 10
+```
 
-## Development checks
+The `.env` is always loaded from beside the script. Windows paths use ordinary single backslashes; optional matching quotes are supported. Values are literal: no variable expansion, escapes, or inline comments. Process environment variables override `.env`, and `--email` / `--output` / `--limit` override both. Relative backup paths resolve from the current working directory. A blank or missing password triggers a hidden terminal prompt.
+
+`--limit 10` alone selects up to 10 per folder. Messages are selected by highest IMAP UID (most recently added to the folder, not necessarily newest Date). Rerunning selects the same sample rather than 10 additional messages. Clear `BACKUP_LIMIT`, set `BACKUP_FOLDERS=all`, and omit selection options for all selectable folders, including Sent, custom folders, Spam and Trash when exposed by Yahoo. A limited run prints “Selected backup complete”; it is not a complete account backup.
+
+## Open and preserve backups
+
+In File Explorer, search the destination for `*.eml`, then right-click a file and choose **Open with > Thunderbird** (or an EML-capable Outlook installation). Thunderbird also has **File > Open > Saved Message**. Each EML includes the original message, headers, and embedded attachments and can be read offline.
+
+The script preserves Yahoo mail: it uses read-only folders and BODY.PEEK and does not delete, move or mark messages read. **Downloading does not free Yahoo storage.** Verify messages and attachments and keep a second backup before separately deciding which originals to delete. Mail that never reached Yahoo while storage was full cannot be recovered here.
+
+Keep the whole backup directory together. Folders use readable names such as `Inbox` and `Sent`; `folder.json` records the original IMAP name. Unsafe characters are replaced, nested Yahoo names are flattened, and conflicting names get a unique suffix. EML names include UIDVALIDITY and UID, for example `Inbox/123-7.eml`. `manifest.sqlite3` tracks message UIDs and SHA-256 checksums. Rerunning verifies saved files, repairs missing or changed files, and downloads new messages. A Yahoo UID reset creates a separate generation, which can duplicate messages while preserving the old backup. Scans are not a simultaneous snapshot; contacts, calendars, account settings and message flags are not backed up.
+
+Allow enough disk space, run one backup process per destination, and rerun after network failures or throttling. Backups are not encrypted by this script. Git ignores EML and manifest files as well as the default `yahoo-backup` directory; choose a destination outside the repository for your backups.
+
+## Checks
 
 ```powershell
 py -m unittest discover -s tests -v
 ```
 
-## Try a small backup first
+## Date period and total counts
 
-```powershell
-py main.py --email "dad@yahoo.com" --output "D:\MailBackup" --inbox-only --limit 10
+Each folder prints its total message count before filtering, then the number matching the period and the number selected after the limit. For Inbox only, run `py main.py --inbox-only`.
+
+Set optional inclusive dates in `.env`:
+
+```dotenv
+BACKUP_START_DATE=2025-09-01
+BACKUP_END_DATE=2025-09-30
 ```
 
-This selects the 10 highest IMAP UIDs in Inbox (most recently added to that folder, not necessarily the newest Date headers). `--limit 10` without `--inbox-only` selects up to 10 per folder. These are selected messages, not 10 additional downloads on each run. Remove both options to back up everything into the same destination; verified files are reused. A limited run prints “Selected backup complete”, which does not mean the entire account was backed up.
+Leave either blank for an open-ended period, or both blank for all dates. Dates use the server's IMAP internal received date, not the sender's Date header, with day-level precision. Imported or moved messages may have a different internal date. The limit is applied after date filtering, per folder; clear `BACKUP_LIMIT` to include all messages in the period. Already backed-up messages outside the period remain on disk.
 
-## Open downloaded messages
+For a one-run override: `py main.py --start-date 2025-09-01 --end-date 2025-09-30`. Invalid dates and reversed ranges are rejected before sign-in.
 
-In Windows File Explorer, search the backup directory for `*.eml`. Right-click a result, choose **Open with**, and select Thunderbird. Each file opens as a message with its body and attachments. You can also open a saved message from Thunderbird's **File > Open > Saved Message** menu. Reading local EML files does not require signing into Yahoo.
 
-## Sign-in without an app password
+## Folder selection and Yahoo counts
 
-Yahoo supports OAuth2: you sign in on Yahoo's authorization page and the client receives a token rather than your account password. Thunderbird supports this already: https://support.mozilla.org/en-US/kb/thunderbird-and-yahoo
+Set `BACKUP_FOLDERS=inbox` in `.env` for Inbox only, or `BACKUP_FOLDERS=all` for every selectable folder. New local/example settings default to Inbox for testing. Without this setting the program preserves the earlier all-folders behavior. `--folders inbox` or `--folders all` overrides the setting for a single run; `--inbox-only` remains available.
 
-This script currently supports app passwords only. Implementing our own Yahoo OAuth application requires developer registration and Yahoo Mail access; it is not enabled merely by changing an IMAP option. Yahoo's developer documentation: https://senders.yahooinc.com/developer/documentation/
+The app uses `export.imap.mail.yahoo.com`, Yahoo's [documented download server](https://help.yahoo.com/kb/SLN28681.html). The earlier regular IMAP endpoint could expose a limited mailbox view. Counts show messages visible through the server before date or download limits; an exact 10,000 count now displays a possible-incompleteness notice. Compare with Yahoo webmail after rerunning. Do not treat a completed run as proof that Yahoo exposed every message. Yahoo also documents possible download issues for folders with 100,000 or more messages. Existing backups are retained and reused where folder UIDs and UIDVALIDITY match.
+
+Existing hash-based backups are reused on the next run: selected, verified messages are copied into the readable folder without downloading again. Old files remain in place, so this can temporarily use additional disk space. Only messages selected by the current folder/date/limit settings are copied.

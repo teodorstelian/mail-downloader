@@ -59,6 +59,51 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(list(folders(client)), [b'"My \\"folder\\""'])
 
 
+    def test_received_period_and_total_count(self):
+        from datetime import date
+        from contextlib import redirect_stdout
+        from io import StringIO
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            client = self.client()
+            client.uid.side_effect = [('OK', [b'1 2 3 4']), ('OK', [b'2 3']), ('OK', [(b'body', b'message')])]
+            output = StringIO()
+            with redirect_stdout(output):
+                backup(client, Path(directory), 'dad@yahoo.com', limit=1, start_date=date(2025, 9, 1), end_date=date(2025, 9, 30))
+            self.assertIn('4 total messages', output.getvalue())
+            self.assertIn('2 match the period; 1 selected', output.getvalue())
+            self.assertEqual(client.uid.call_args_list[1].args, ('search', None, 'SINCE', '01-Sep-2025', 'BEFORE', '01-Oct-2025'))
+            self.assertEqual(client.uid.call_args_list[2].args[1], b'3')
+
+
+    def test_readable_folders_and_legacy_reuse(self):
+        import hashlib
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            client = self.client()
+            backup(client, root, 'dad@yahoo.com')
+            saved = root / 'Inbox' / '123-7.eml'
+            self.assertTrue(saved.is_file())
+            legacy = root / hashlib.sha256(b'"INBOX"').hexdigest() / '123'
+            legacy.mkdir(parents=True)
+            saved.rename(legacy / '7.eml')
+            client.uid.reset_mock()
+            backup(client, root, 'dad@yahoo.com')
+            self.assertTrue(saved.is_file())
+            self.assertEqual([call.args[0] for call in client.uid.call_args_list], ['search'])
+
+    def test_safe_names_and_collisions(self):
+        from main import export_folder
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            first = export_folder(root, b'"Work/Invoices"')
+            second = export_folder(root, b'"Work:Invoices"')
+            self.assertNotEqual(first, second)
+            self.assertEqual(first.name, 'Work_Invoices')
+            self.assertEqual(export_folder(root, b'"Work/Invoices"'), first)
+            for mailbox in (b'"../outside"', b'"CON"', b'".."'):
+                path = export_folder(root, mailbox)
+                self.assertEqual(path.resolve().parent, root.resolve())
+
 if __name__ == '__main__':
     unittest.main()
 

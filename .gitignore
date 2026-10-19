@@ -2,3 +2,8 @@ __pycache__/
 .idea/
 yahoo-backup/
 *.part
+.env
+.env.*
+!.env.example
+*.eml
+manifest.sqlite3*
