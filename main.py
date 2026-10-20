@@ -2,7 +2,10 @@
 import argparse
 from contextlib import closing
 from datetime import date, timedelta
+from email import policy
+from email.parser import BytesHeaderParser
 import getpass
+import logging
 import os
 import hashlib
 import imaplib
@@ -15,6 +18,35 @@ import ssl
 import sys
 import time
 from pathlib import Path
+
+
+LOGGER = logging.getLogger('mail_backup')
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.propagate = False
+
+
+def setup_logs(directory):
+    for handler in list(LOGGER.handlers):
+        LOGGER.removeHandler(handler)
+        handler.close()
+    LOGGER.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    try:
+        for filename, level in [('logs.txt', logging.INFO), ('error logs.txt', logging.WARNING)]:
+            handler = logging.FileHandler(directory / filename, mode='a', encoding='utf-8')
+            handler.setLevel(level)
+            handler.setFormatter(formatter)
+            LOGGER.addHandler(handler)
+    except OSError:
+        for handler in list(LOGGER.handlers):
+            LOGGER.removeHandler(handler)
+            handler.close()
+        raise
+
+
+def report(message, level=logging.INFO, **print_options):
+    LOGGER.log(level, message)
+    print(message, **print_options)
 
 
 def folders(connection):
@@ -72,13 +104,48 @@ def export_folder(root, mailbox):
     raise RuntimeError('Cannot safely assign an export folder name')
 
 
+class MessageDownloadError(RuntimeError):
+    """A failed FETCH that can be retried using a fresh connection."""
+
+
+def fetch_failure(uid, status, data):
+    # Only expose standalone server status text, never message literals.
+    responses = [item.decode('utf-8', errors='replace') for item in (data or []) if isinstance(item, bytes)]
+    detail = ' '.join(responses)
+    detail = re.sub(r'[\x00-\x1f\x7f]', ' ', detail)[:300]
+    return f'Could not download message UID {uid.decode("ascii")} (FETCH {status})' + (f': {detail}' if detail else '')
+
+
+def message_error_context(connection, uid):
+    """Best-effort headers for an error; never mark the message as read."""
+    try:
+        status, data = connection.uid('fetch', uid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
+        if status != 'OK':
+            return 'Subject: unavailable; Date: unavailable'
+        bodies = [item[1] for item in (data or []) if isinstance(item, tuple) and isinstance(item[1], bytes)]
+        if len(bodies) != 1:
+            return 'Subject: unavailable; Date: unavailable'
+        headers = BytesHeaderParser(policy=policy.default).parsebytes(bodies[0])
+
+        def display(name):
+            value = str(headers.get(name) or '(missing)')
+            return re.sub(r'[\x00-\x1f\x7f]', ' ', value)[:300]
+
+        return f'Subject: {display("Subject")}; Date: {display("Date")}'
+    except (OSError, imaplib.IMAP4.error, ValueError):
+        return 'Subject: unavailable; Date: unavailable (header lookup failed)'
+
+
 def save_message(connection, uid, path):
     status, data = connection.uid('fetch', uid, '(BODY.PEEK[])')
     if status != 'OK':
-        raise RuntimeError(f'Could not download message UID {uid!r}')
+        error = fetch_failure(uid, status, data) + '; ' + message_error_context(connection, uid)
+        if status == 'NO':
+            raise MessageDownloadError(error)
+        raise RuntimeError(error)
     bodies = [item[1] for item in data if isinstance(item, tuple)]
     if len(bodies) != 1 or not isinstance(bodies[0], bytes):
-        raise RuntimeError(f'Message UID {uid!r} returned no complete body')
+        raise MessageDownloadError(f'Message UID {uid.decode("ascii")} returned no complete body; ' + message_error_context(connection, uid))
     body = bodies[0]
     temporary = path.with_suffix('.part')
     temporary.write_bytes(body)
@@ -114,9 +181,9 @@ def backup(connection, root, address, limit=None, inbox_only=False, start_date=N
             if status != 'OK' or not data or not isinstance(data[0], bytes):
                 raise RuntimeError(f'Could not list messages in {label}')
             total = len(data[0].split())
-            print(f'{label}: {total:,} total messages visible to the server', flush=True)
+            report(f'{label}: {total:,} total messages visible to the server', flush=True)
             if total == 10000:
-                print('  Note: exactly 10,000 messages are visible. If Yahoo webmail shows more, this backup may be incomplete.', flush=True)
+                report('  Note: exactly 10,000 messages are visible. If Yahoo webmail shows more, this backup may be incomplete.', level=logging.WARNING, flush=True)
             if start_date or end_date:
                 criteria = []
                 if start_date:
@@ -133,7 +200,7 @@ def backup(connection, root, address, limit=None, inbox_only=False, start_date=N
             matching = len(uids)
             if limit is not None:
                 uids = uids[:limit]
-            print(f'{label}: {matching:,} match the period; {len(uids):,} selected after limit', flush=True)
+            report(f'{label}: {matching:,} match the period; {len(uids):,} selected after limit', flush=True)
             for index, uid in enumerate(uids, 1):
                 if not uid.isdigit():
                     raise RuntimeError('Server returned an invalid message UID')
@@ -148,12 +215,15 @@ def backup(connection, root, address, limit=None, inbox_only=False, start_date=N
                 if saved and path.is_file() and path.stat().st_size == saved[0] and hashlib.sha256(path.read_bytes()).hexdigest() == saved[1]:
                     skipped += 1
                     continue
-                size, digest = save_message(connection, uid, path)
+                try:
+                    size, digest = save_message(connection, uid, path)
+                except MessageDownloadError as error:
+                    raise MessageDownloadError(f'Folder {label}: {error}') from error
                 database.execute('INSERT OR REPLACE INTO messages VALUES (?, ?, ?, ?, ?)', (label, validity, uid_text, size, digest))
                 database.commit()
                 downloaded += 1
-                print(f'  {index}/{len(uids)} saved ({size:,} bytes)', flush=True)
-        print(f'{"Selected backup" if limit is not None or inbox_only or start_date or end_date else "Backup"} complete: {downloaded} downloaded, {skipped} verified and skipped.')
+                report(f'  {index}/{len(uids)} saved ({size:,} bytes)', flush=True)
+        report(f'{"Selected backup" if limit is not None or inbox_only or start_date or end_date else "Backup"} complete: {downloaded} downloaded, {skipped} verified and skipped.')
 
 
 def load_settings(path):
@@ -225,6 +295,12 @@ def main():
     address = (args.email or input('Yahoo email address: ')).strip()
     if not address or '@' not in address:
         parser.error('Enter a full email address')
+    try:
+        setup_logs(Path(__file__).resolve().parent)
+    except OSError as error:
+        print(f'Could not open backup logs: {error}', file=sys.stderr)
+        return 1
+    LOGGER.info('Backup run started; output=%s; folders=%s; limit=%s; start=%s; end=%s', args.output.resolve(), 'inbox' if inbox_only else 'all', args.limit, args.start_date, args.end_date)
     connection = None
     try:
         password = (settings.get('YAHOO_APP_PASSWORD') or getpass.getpass('Yahoo app password (hidden): ')).replace(' ', '')
@@ -236,7 +312,7 @@ def main():
                 connection.login(address, password)
                 backup(connection, args.output.resolve(), address, args.limit, inbox_only, start_date=args.start_date, end_date=args.end_date)
                 break
-            except (TimeoutError, ConnectionError, imaplib.IMAP4.abort):
+            except (TimeoutError, ConnectionError, imaplib.IMAP4.abort, MessageDownloadError) as error:
                 if connection is not None:
                     try:
                         connection.shutdown()
@@ -246,14 +322,14 @@ def main():
                 if attempt == args.retries:
                     raise
                 delay = min(5 * (2 ** attempt), 30)
-                print(f'Connection interrupted. Reconnecting in {delay}s (retry {attempt + 1}/{args.retries}); verified files will be skipped.', flush=True)
+                report(f'Backup interrupted: {error}. Reconnecting in {delay}s (retry {attempt + 1}/{args.retries}); verified files will be skipped.', level=logging.WARNING, flush=True)
                 time.sleep(delay)
         return 0
     except (OSError, imaplib.IMAP4.error, RuntimeError, sqlite3.Error, ValueError) as error:
-        print(f'Backup stopped: {error}. Fix the problem and run the same command to resume.', file=sys.stderr)
+        report(f'Backup stopped: {error}. Fix the problem and run the same command to resume.', level=logging.ERROR, file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print('\nStopped. Run the same command to resume.', file=sys.stderr)
+        print('\nStopped. Run the same command to resume.', level=logging.ERROR, file=sys.stderr)
         return 130
     finally:
         if connection is not None:

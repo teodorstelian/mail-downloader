@@ -79,3 +79,9 @@ Existing hash-based backups are reused on the next run: selected, verified messa
 `IMAP_TIMEOUT=300` in `.env` controls the wait for each network operation in seconds. `BACKUP_RETRIES=5` allows five reconnect attempts after a timeout, connection reset, or aborted IMAP session, waiting 5, 10, 20, 30, then 30 seconds. Each attempt logs in again and resumes through the manifest; verified messages are skipped. Authentication and local disk errors stop immediately. If retries are exhausted, rerun `py main.py`. Increase the timeout for a slow connection or large attachments. Interrupted messages may need to download again, but completed and verified files are retained.
 
 The default run backs up all folders and all dates without a message limit, with a 300-second network timeout and up to five reconnect attempts.
+
+Failed message downloads with a FETCH NO response or missing message body now trigger the same bounded reconnect/resume attempts. The error includes the message UID and available server status text to help diagnose persistent failures. A message is recorded as backed up only after a complete successful download. If the server keeps refusing a message, the run stops with an error after exhausting retries; it does not silently skip that message or claim completion. FETCH BAD responses stop immediately because they can indicate a protocol problem.
+
+## Log files
+
+Every backup run appends timestamped progress, folder counts, retries and completion messages to `logs.txt` beside `main.py`. `error logs.txt` receives warnings and errors only, including available email subject/date and folder on failed downloads. Output is also shown in the terminal. Both files are ignored by Git. Password input and `.env` contents are not logged. Logs can contain private email subjects; keep them private. Files append across runs, so previous history is preserved. Timestamps use the computer's local time.

@@ -7,3 +7,5 @@ yahoo-backup/
 !.env.example
 *.eml
 manifest.sqlite3*
+logs.txt
+error logs.txt

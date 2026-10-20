@@ -35,7 +35,7 @@ class BackupTests(unittest.TestCase):
     def test_failed_fetch_is_not_recorded(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             client = self.client()
-            client.uid.side_effect = [('OK', [b'7']), ('OK', [None])]
+            client.uid.side_effect = [('OK', [b'7']), ('OK', [None]), ('NO', [b'Unavailable'])]
             with self.assertRaisesRegex(RuntimeError, 'no complete body'):
                 backup(client, Path(directory), 'dad@yahoo.com')
             self.assertEqual(list(Path(directory).rglob('*.eml')), [])
@@ -103,6 +103,37 @@ class BackupTests(unittest.TestCase):
             for mailbox in (b'"../outside"', b'"CON"', b'".."'):
                 path = export_folder(root, mailbox)
                 self.assertEqual(path.resolve().parent, root.resolve())
+
+    def test_fetch_no_reports_reason_and_can_resume(self):
+        from main import MessageDownloadError
+        import sqlite3
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            client = self.client()
+            client.uid.side_effect = [('OK', [b'55005']), ('NO', [b'[UNAVAILABLE] Try again later']), ('OK', [(b'headers', b'Subject: Important message\r\nDate: Tue, 20 Oct 2026 10:00:00 +0300\r\n\r\n')])]
+            with self.assertRaisesRegex(MessageDownloadError, '55005.*FETCH NO.*UNAVAILABLE.*Subject: Important message.*Date: Tue, 20 Oct 2026'):
+                backup(client, root, 'dad@yahoo.com')
+            from contextlib import closing
+            with closing(sqlite3.connect(root / 'manifest.sqlite3')) as database:
+                self.assertEqual(database.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 0)
+            self.assertEqual(list(root.rglob('*.eml')), [])
+            client.uid.side_effect = [('OK', [b'55005']), ('OK', [(b'body', b'complete message')])]
+            backup(client, root, 'dad@yahoo.com')
+            self.assertEqual((root / 'Inbox' / '123-55005.eml').read_bytes(), b'complete message')
+
+    def test_error_headers_decode_subject_and_handle_lookup_failure(self):
+        from main import save_message, MessageDownloadError
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            path = Path(directory) / 'message.eml'
+            client = Mock()
+            client.uid.side_effect = [('NO', [b'Try later']), ('OK', [(b'headers', b'Subject: =?utf-8?b?Q2Fmw6k=?=\r\nDate: Tue, 20 Oct 2026 10:00:00 +0300\r\n\r\n')])]
+            with self.assertRaisesRegex(MessageDownloadError, 'Subject: Café; Date: Tue, 20 Oct 2026'):
+                save_message(client, b'55005', path)
+            self.assertEqual(client.uid.call_args.args[2], '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
+            self.assertFalse(path.exists())
+            client.uid.side_effect = [('NO', [b'Try later']), TimeoutError('timeout')]
+            with self.assertRaisesRegex(MessageDownloadError, '55005.*Subject: unavailable.*header lookup failed'):
+                save_message(client, b'55005', path)
 
 if __name__ == '__main__':
     unittest.main()
