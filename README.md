@@ -80,7 +80,7 @@ Existing hash-based backups are reused on the next run: selected, verified messa
 
 The default run backs up all folders and all dates without a message limit, with a 300-second network timeout and up to five reconnect attempts.
 
-Failed message downloads with a FETCH NO response or missing message body now trigger the same bounded reconnect/resume attempts. The error includes the message UID and available server status text to help diagnose persistent failures. A message is recorded as backed up only after a complete successful download. If the server keeps refusing a message, the run stops with an error after exhausting retries; it does not silently skip that message or claim completion. FETCH BAD responses stop immediately because they can indicate a protocol problem.
+Message-specific FETCH NO responses and missing message bodies are logged and skipped so remaining messages and folders can continue. The summary separately counts downloaded messages, already verified backups, and failed/skipped messages. If anything failed, it says “finished with missing emails” instead of claiming a complete backup. Failed emails are not recorded as successfully backed up, so rerunning tries them again. Details, including available subject/date, folder and UID, are saved to `error logs.txt`. Network failures still use reconnect attempts, while protocol errors (FETCH BAD), authentication problems and local disk errors stop the run.
 
 ## Log files
 

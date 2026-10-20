@@ -92,7 +92,7 @@ class SettingsTests(unittest.TestCase):
             sleep.assert_called_once_with(5)
 
     def test_retries_are_bounded_and_auth_errors_are_not_retried(self):
-        for failure, expected in [(main.MessageDownloadError('UID 55005 FETCH NO'), 2), (TimeoutError('timeout'), 2), (main.imaplib.IMAP4.error('Authentication failed'), 1)]:
+        for failure, expected in [(TimeoutError('timeout'), 2), (main.imaplib.IMAP4.error('Authentication failed'), 1)]:
             with self.subTest(failure=type(failure)), patch.object(main, 'load_settings', return_value={'YAHOO_EMAIL': 'you@yahoo.com', 'YAHOO_APP_PASSWORD': 'fake', 'BACKUP_RETRIES': '1'}), patch.object(main.imaplib, 'IMAP4_SSL') as client, patch.object(main, 'backup'), patch.object(main.time, 'sleep'), patch('sys.argv', ['main.py']), patch('sys.stderr'):
                 client.return_value.login.side_effect = failure
                 self.assertEqual(main.main(), 1)

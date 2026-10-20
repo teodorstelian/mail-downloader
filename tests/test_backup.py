@@ -36,8 +36,7 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
             client = self.client()
             client.uid.side_effect = [('OK', [b'7']), ('OK', [None]), ('NO', [b'Unavailable'])]
-            with self.assertRaisesRegex(RuntimeError, 'no complete body'):
-                backup(client, Path(directory), 'dad@yahoo.com')
+            self.assertEqual(backup(client, Path(directory), 'dad@yahoo.com'), 1)
             self.assertEqual(list(Path(directory).rglob('*.eml')), [])
 
     def test_limit_selects_newest_uids_and_only_inbox(self):
@@ -111,8 +110,11 @@ class BackupTests(unittest.TestCase):
             root = Path(directory)
             client = self.client()
             client.uid.side_effect = [('OK', [b'55005']), ('NO', [b'[UNAVAILABLE] Try again later']), ('OK', [(b'headers', b'Subject: Important message\r\nDate: Tue, 20 Oct 2026 10:00:00 +0300\r\n\r\n')])]
-            with self.assertRaisesRegex(MessageDownloadError, '55005.*FETCH NO.*UNAVAILABLE.*Subject: Important message.*Date: Tue, 20 Oct 2026'):
-                backup(client, root, 'dad@yahoo.com')
+            from unittest.mock import patch
+            with patch('main.report') as report:
+                self.assertEqual(backup(client, root, 'dad@yahoo.com'), 1)
+            self.assertIn('Subject: Important message', str(report.call_args_list))
+            self.assertIn('1 failed/skipped', str(report.call_args_list))
             from contextlib import closing
             with closing(sqlite3.connect(root / 'manifest.sqlite3')) as database:
                 self.assertEqual(database.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 0)
@@ -134,6 +136,29 @@ class BackupTests(unittest.TestCase):
             client.uid.side_effect = [('NO', [b'Try later']), TimeoutError('timeout')]
             with self.assertRaisesRegex(MessageDownloadError, '55005.*Subject: unavailable.*header lookup failed'):
                 save_message(client, b'55005', path)
+
+    def test_failed_email_does_not_block_next_email_or_folder(self):
+        import sqlite3
+        from contextlib import closing
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            root = Path(directory)
+            client = self.client()
+            client.list.return_value[1].append(b'(\\HasNoChildren) "/" "Sent"')
+            client.uid.side_effect = [
+                ('OK', [b'9 8']), ('NO', [b'Unavailable']), ('NO', [b'No headers']),
+                ('OK', [(b'body', b'Inbox message')]),
+                ('OK', [b'7']), ('OK', [(b'body', b'Sent message')]),
+            ]
+            with patch('main.report') as report:
+                self.assertEqual(backup(client, root, 'dad@yahoo.com'), 1)
+            self.assertTrue((root / 'Inbox' / '123-8.eml').is_file())
+            self.assertTrue((root / 'Sent' / '123-7.eml').is_file())
+            self.assertFalse((root / 'Inbox' / '123-9.eml').exists())
+            with closing(sqlite3.connect(root / 'manifest.sqlite3')) as database:
+                self.assertEqual(database.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 2)
+            self.assertIn('2 downloaded, 0 already backed up, 1 failed/skipped', str(report.call_args_list))
+            self.assertIn('finished with missing emails', str(report.call_args_list))
 
 if __name__ == '__main__':
     unittest.main()

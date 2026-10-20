@@ -105,7 +105,7 @@ def export_folder(root, mailbox):
 
 
 class MessageDownloadError(RuntimeError):
-    """A failed FETCH that can be retried using a fresh connection."""
+    """A message-specific failure that should not block remaining messages."""
 
 
 def fetch_failure(uid, status, data):
@@ -163,7 +163,7 @@ def backup(connection, root, address, limit=None, inbox_only=False, start_date=N
         database.execute('INSERT OR IGNORE INTO account VALUES (?)', (address.casefold(),))
         database.execute('CREATE TABLE IF NOT EXISTS messages (folder TEXT, validity TEXT, uid TEXT, size INTEGER, sha256 TEXT, PRIMARY KEY(folder, validity, uid))')
         database.commit()
-        downloaded = skipped = 0
+        downloaded = skipped = failed = 0
         for mailbox in folders(connection):
             if inbox_only and mailbox.strip(b'"').upper() != b'INBOX':
                 continue
@@ -218,12 +218,19 @@ def backup(connection, root, address, limit=None, inbox_only=False, start_date=N
                 try:
                     size, digest = save_message(connection, uid, path)
                 except MessageDownloadError as error:
-                    raise MessageDownloadError(f'Folder {label}: {error}') from error
+                    failed += 1
+                    report(f'Skipped failed email in folder {label}: {error}', level=logging.ERROR, flush=True)
+                    continue
                 database.execute('INSERT OR REPLACE INTO messages VALUES (?, ?, ?, ?, ?)', (label, validity, uid_text, size, digest))
                 database.commit()
                 downloaded += 1
                 report(f'  {index}/{len(uids)} saved ({size:,} bytes)', flush=True)
-        report(f'{"Selected backup" if limit is not None or inbox_only or start_date or end_date else "Backup"} complete: {downloaded} downloaded, {skipped} verified and skipped.')
+        scope = 'Selected backup' if limit is not None or inbox_only or start_date or end_date else 'Backup'
+        outcome = 'finished with missing emails' if failed else 'complete'
+        report(f'{scope} {outcome}: {downloaded} downloaded, {skipped} already backed up, {failed} failed/skipped.', level=logging.WARNING if failed else logging.INFO)
+        if failed:
+            report('Failed emails were not marked as backed up. See error logs.txt; rerun to try them again.', level=logging.WARNING)
+        return failed
 
 
 def load_settings(path):
@@ -312,7 +319,7 @@ def main():
                 connection.login(address, password)
                 backup(connection, args.output.resolve(), address, args.limit, inbox_only, start_date=args.start_date, end_date=args.end_date)
                 break
-            except (TimeoutError, ConnectionError, imaplib.IMAP4.abort, MessageDownloadError) as error:
+            except (TimeoutError, ConnectionError, imaplib.IMAP4.abort) as error:
                 if connection is not None:
                     try:
                         connection.shutdown()
